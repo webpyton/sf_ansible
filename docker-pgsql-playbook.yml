@@ -1,0 +1,138 @@
+- name: Install and configure PostgreSQL
+  hosts: database
+  become: yes
+  vars:
+    postgresql_packages:
+      Debian: "postgresql-{{ postgresql_version }}, postgresql-contrib-{{ postgresql_version }}"
+      RefHat: "postgresql{{ postgresql_version }}, postgresql{{ postgresql_version }}-server"
+    postgresql_conf_path:
+      Debian: "/etc/postgresql/{{ postgresql_version }}/main/postgresql.conf"
+      RedHat: "/var/lib/pgsql/{{ postgresql_version }}/data/postgresql.conf"
+
+  tasks:
+    - name: Import the repository signing key on Debian based distributions
+      apt_key:
+        url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Add PostgreSQL repository on Debian based distributions
+      apt_repository:
+        repo: deb http://apt.postgresql.org/pub/repos/apt/ {{ ansible_distribution_release }}-pgdg main
+        state: present
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+
+    - name: Import the repository signing key on RedHat based distributions
+      command: rpm --import https://download.postgresql.org/pub/repos/yum/keys/PGDG-RPM-GPG-KEY-RHEL
+      when: ansible_os_family == "RedHat"
+
+    - name: Add PostgreSQL repository on RedHat based distributions
+      yum:
+        name: https://download.postgresql.org/pub/repos/yum/reporpms/EL-{{ ansible_distribution_major_version }}-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+        state: present
+      when: ansible_os_family == "RedHat"
+
+    - name: Install PostgreSQL packages
+      package:
+        name: "{{ postgresql_packages[ansible_os_family] }}"
+        state: present
+        update_cache: yes
+      when: ansible_os_family in postgresql_packages
+
+    - name: Ensure the data directory exists with specific permissions
+      file:
+        path: "{{ postgresql_data_dir }}"
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: 0700
+      when: postgresql_data_dir is defined and postgresql_data_dir != "/var/lib/postgresql/{{ postgresql_version }}/main"
+
+    - name: Stop PostgreSQL service before any configuration
+      service:
+        name: postgresql
+        state: stopped
+
+    - name: Initialize PostgreSQL database with custom data directory on Debian based distributions
+      command: "/usr/lib/postgresql/{{ postgresql_version }}/bin/initdb -D {{ postgresql_data_dir }}"
+      args:
+        creates: "{{ postgresql_data_dir }}/PG_VERSION"
+      become_user: postgres
+      when: ansible_os_family == "Debian" and postgresql_data_dir is defined and postgresql_data_dir != "/var/lib/postgresql/{{ postgresql_version }}/main"
+
+    - name: Initialize PostgreSQL database with custom data directory on RedHat based distributions
+      command: "/usr/pgsql-{{ postgresql_version }}/bin/postgresql-{{ postgresql_version }}-setup initdb -D {{ postgresql_data_dir }}"
+      args:
+        creates: "{{ postgresql_data_dir }}/PG_VERSION"
+      when: ansible_os_family == "RedHat" and postgresql_data_dir is defined and postgresql_data_dir != "/var/lib/postgresql/{{ postgresql_version }}/main"
+
+    - name: Initialize PostgreSQL database with default data directory on RedHat based distributions
+      command: "/usr/pgsql-{{ postgresql_version }}/bin/postgresql-{{ postgresql_version }}-setup initdb }}"
+      args:
+        creates: "{{ postgresql_data_dir }}/PG_VERSION"
+      when: ansible_os_family == "RedHat" and (postgresql_data_dir is not defined or postgresql_data_dir == "/var/lib/postgresql/{{ postgresql_version }}/main")
+
+    - name: Configure PostgreSQL to use the specified data directory
+      lineinfile:
+        path: "{{ postgresql_conf_path[ansible_os_family] }}"
+        regexp: '^data_directory ='
+        line: "data_directory = '{{ postgresql_data_dir }}'"
+        state: present
+      when: ansible_os_family in postgresql_packages
+
+    - name: Start and enable PostgreSQL service
+      service:
+        name: postgresql
+        enabled: yes
+        state: started
+
+- name: Install Docker CE
+  hosts: app
+  become: yes
+
+  tasks:
+  - name: Install prerequisites for Docker repository on Ubuntu
+    apt:
+      name: ['apt-transport-https', 'ca-certificates', 'curl', 'gnupg2', 'software-properties-common']
+      state: present
+    when: ansible_distribution == "Ubuntu"
+
+  - name: Add Docker GPG key on Ubuntu
+    apt_key:
+      url: https://download.docker.com/linux/ubuntu/gpg
+      validate_certs: false
+    when: ansible_distribution == "Ubuntu"
+
+  - name: Add Docker APT repository
+    apt_repository:
+      repo: deb https://download.docker.com/linux/ubuntu bionic stable
+      state: present
+      update_cache: yes
+    when: ansible_distribution == "Ubuntu"
+
+  - name: Install prerequisites for Docker repository on CentOS
+    package:
+      name: ['yum-utils', 'device-mapper-persistent-data', 'lvm2']
+      state: present
+    when: ansible_distribution == "CentOS"
+
+  - name: Add Docker repository on CentOS
+    yum_repository:
+      name: docker-ce
+      description: Docker CE Stable - $basearch
+      baseurl: https://download.docker.com/linux/centos/{{ ansible_distribution_major_version }}/$basearch/stable
+      gpgcheck: yes
+      gpgkey: https://download.docker.com/linux/centos/gpg
+      enabled: yes
+    when: ansible_distribution == "CentOS"
+
+  - name: Install Docker CE
+    package:
+      name: ['docker-ce', 'docker-ce-cli', 'containerd.io', 'docker-buildx-plugin', 'docker-compose-plugin']
+      state: present
+
+  - name: Run docker service
+    service:
+      name: docker
+      state: started
